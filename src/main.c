@@ -17,6 +17,7 @@ static void usage(void) {
         "  ralt install <name|url|dir>                     resolve/install a dep\n"
         "  ralt deps                                       list collected dep files\n"
         "  ralt fmt <file.tp>                              print canonical form\n"
+        "  ralt lint <file.tp> [--json]                    tier-ceiling lint\n"
         "  ralt doc <file.tp> [--json]                     fn signatures\n"
         "  ralt lsp                                        editor/agent server\n"
         "\n"
@@ -223,6 +224,24 @@ int main(int argc, char **argv) {
         int ndecls;
         Decl **decls = analyze_proj(a, file, &ndecls);
         (void)decls; (void)ndecls;
+        print_diags(json);
+        return g_nerrors > 0 ? 1 : 0;
+    }
+
+    if (strcmp(cmd, "lint") == 0) {
+        /* parse-only: a lib without main is a legal lint target */
+        size_t len;
+        char *src = read_all(file, &len);
+        if (!src) {
+            fprintf(stderr, "ralt: cannot read %s\n", file);
+            return 1;
+        }
+        int ntoks;
+        Token *toks = lex_file(a, src, len, file, &ntoks);
+        Decl **decls = parse_file(a, toks, ntoks, file);
+        int n = 0;
+        while (decls && decls[n]) n++;
+        lint_file(a, decls, n);
         print_diags(json);
         return g_nerrors > 0 ? 1 : 0;
     }
