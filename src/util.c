@@ -208,6 +208,7 @@ const char *tok_name(TokKind k) {
     case TK_AMP: return "TK_AMP";
     case TK_QUESTION: return "TK_QUESTION";
     case TK_POW: return "TK_POW";
+    case TK_AS: return "TK_AS";
     }
     return "TK_UNKNOWN";
 }

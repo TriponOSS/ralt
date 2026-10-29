@@ -727,12 +727,40 @@ Decl **parse_file(Arena *a, Token *toks, int ntoks, const char *file) {
     /* shebang line: ignore a #! prefix (lexer skips to first real token) */
 
     while (!at(&p, TK_EOF)) {
+        bool is_pub = false;
+        if (at(&p, TK_PUB)) {
+            advance(&p);
+            is_pub = true;
+        }
         if (at(&p, TK_USE)) {
             Token *usekw = advance(&p);
+            if (at(&p, TK_STR)) {
+                /* module import: use "path.tp" as alias; */
+                Token *lit = advance(&p);
+                Decl *d = arena_zalloc(a, sizeof(Decl));
+                d->kind = D_USEMOD;
+                d->path = arena_dupstr(a, lit->text, lit->len);
+                d->span = usekw->span;
+                if (eat(&p, TK_AS)) {
+                    Token *an = expect_token(&p, TK_IDENT, "an alias name after as");
+                    d->name = an->text;
+                } else {
+                    diag(lit->span, E0101, SEV_ERROR,
+                         "module import needs an alias: use \"path.tp\" as name;",
+                         "name the module so qualified calls read alias::fn");
+                    d->name = "module";
+                }
+                expect_token(&p, TK_SEMI, "';' after module import");
+                vec_push_ptr((VecPtr *)&out, d);
+                continue;
+            }
+            if (is_pub) {
+                diag(usekw->span, E0101, SEV_ERROR, "'pub' applies to fn/struct/enum/const",
+                     "module imports are not exported");
+            }
             expect_token(&p, TK_TIER, "'tier' after use");
             Token *tname = expect_token(&p, TK_IDENT, "a tier name (kernel|core|std|full)");
             /* tier check: parsed but honored in P1.1 module model; record now */
-            (void)usekw;
             Decl *d = arena_zalloc(a, sizeof(Decl));
             d->kind = D_TIER;
             d->name = tname->text;
@@ -745,6 +773,7 @@ Decl **parse_file(Arena *a, Token *toks, int ntoks, const char *file) {
             Token *kw = advance(&p);
             Decl *d = arena_zalloc(a, sizeof(Decl));
             d->kind = D_LET;
+            d->is_pub = is_pub;
             d->is_const = (kw->kind == TK_CONST);
             Token *name = expect_token(&p, TK_IDENT, "a binding name after let/const");
             d->name = name->text;
@@ -765,6 +794,7 @@ Decl **parse_file(Arena *a, Token *toks, int ntoks, const char *file) {
             fn->nbody = blk->nbody;
             Decl *d = arena_zalloc(a, sizeof(Decl));
             d->kind = D_FN;
+            d->is_pub = is_pub;
             d->fn = fn;
             vec_push_ptr((VecPtr *)&out, d);
             continue;
@@ -773,6 +803,7 @@ Decl **parse_file(Arena *a, Token *toks, int ntoks, const char *file) {
             StDecl *st = parse_struct(&p);
             Decl *d = arena_zalloc(a, sizeof(Decl));
             d->kind = D_STRUCT;
+            d->is_pub = is_pub;
             d->st = st;
             vec_push_ptr((VecPtr *)&out, d);
             continue;
@@ -781,9 +812,15 @@ Decl **parse_file(Arena *a, Token *toks, int ntoks, const char *file) {
             EnDecl *en = parse_enum(&p);
             Decl *d = arena_zalloc(a, sizeof(Decl));
             d->kind = D_ENUM;
+            d->is_pub = is_pub;
             d->en = en;
             vec_push_ptr((VecPtr *)&out, d);
             continue;
+        }
+        if (is_pub) {
+            diag(peek(&p)->span, E0101, SEV_ERROR,
+                 "'pub' must be followed by fn/struct/enum/const",
+                 "drop it or export an actual declaration");
         }
         Span sp = peek(&p)->span;
         char msg[160];

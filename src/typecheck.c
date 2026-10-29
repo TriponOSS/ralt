@@ -956,6 +956,21 @@ static Ty tc_expr(Ctx *c, Expr *e) {
     }
 
     case EX_VARIANT: {
+        /* qualified module call: alias::fn(args) */
+        if (module_alias_has(e->sval)) {
+            if (!module_pub_has(e->sval, e->vname)) {
+                diag(e->span, E0702, SEV_ERROR,
+                     "that name is not exported by the module",
+                     "mark it 'pub' in the module, or call a public function");
+                e->ty = TY_UNSET;
+                return TY_UNSET;
+            }
+            char buf[512];
+            snprintf(buf, sizeof buf, "%s__%s", e->sval, e->vname);
+            e->kind = EX_CALL;
+            e->callee = arena_dupstr(c->a, buf, strlen(buf));
+            return tc_expr(c, e);
+        }
         EnDecl *en = find_enum(c, e->sval);
         if (!en) {
             char msg[200];

@@ -30,6 +30,10 @@ const ErrEntry *err_lookup(int code) {
         {E0601, SEV_WARN,  "unused-binding", "prefix with _ to mute"},
         {E0602, SEV_WARN,  "unreachable-code", "unreachable after earlier return/branch"},
         {E0603, SEV_WARN,  "shadowing", "name shadows an existing binding in scope; rename"},
+        {E0701, SEV_ERROR, "circular-import", "module imports form a cycle; break it"},
+        {E0702, SEV_ERROR, "not-exported", "add 'pub' to the declaration or call a public one"},
+        {E0703, SEV_ERROR, "module-not-found", "check the path in the use statement"},
+        {E0704, SEV_ERROR, "duplicate-module-alias", "two imports share an alias; rename one"},
     };
     static const ErrEntry UNKNOWN = {0, SEV_ERROR, "internal", "report this to the Tripon repo with a minimal repro"};
     for (size_t i = 0; i < sizeof TABLE / sizeof TABLE[0]; i++)

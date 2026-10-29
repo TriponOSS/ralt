@@ -56,6 +56,40 @@ static void mkdir_p(const char *dir) {
     mkdir(tmp, 0755);
 }
 
+/* dirname of a path, for resolving `use "..."` relative to the importer */
+static void dir_of(const char *path, char *buf, size_t sz) {
+    const char *slash = strrchr(path, '/');
+    if (!slash) { snprintf(buf, sz, "."); return; }
+    size_t n = (size_t)(slash - path);
+    if (n >= sz) n = sz - 1;
+    memcpy(buf, path, n);
+    buf[n] = 0;
+    if (n == 0) snprintf(buf, sz, "/");
+}
+
+/* expand `use "file" as alias;` decls into the translation unit */
+static Decl **expand_modules(Arena *a, Decl **decls, int n, const char *base_dir,
+                             int *nout) {
+    int cap = 0, no = 0;
+    Decl **out = NULL;
+    for (int i = 0; i < n; i++) {
+        if (decls[i]->kind != D_USEMOD) continue;
+        int mn = 0;
+        Decl **m = module_expand(a, decls[i]->path, decls[i]->name, base_dir,
+                                 decls[i]->span, &mn);
+        for (int j = 0; j < mn; j++) {
+            if (no == cap) {
+                cap = cap ? cap * 2 : 16;
+                out = realloc(out, sizeof(Decl *) * (size_t)cap);
+                if (!out) exit(1);
+            }
+            out[no++] = m[j];
+        }
+    }
+    *nout = no;
+    return out;
+}
+
 /* pipeline shared by build/check: parse + typecheck, one file */
 static Decl **analyze(Arena *a, const char *path, int *ndecls) {
     size_t len;
@@ -69,7 +103,34 @@ static Decl **analyze(Arena *a, const char *path, int *ndecls) {
     Decl **decls = parse_file(a, toks, ntoks, path);
     int n = 0;
     while (decls && decls[n]) n++;
-    if (g_nerrors == 0) typecheck_file(a, decls, n);
+    module_reset();
+    char base[1024];
+    dir_of(path, base, sizeof base);
+    int nmods = 0;
+    Decl **mods = expand_modules(a, decls, n, base, &nmods);
+    Decl **merged = (Decl **)calloc((size_t)(n + nmods + 1), sizeof *merged);
+    int k = 0;
+    for (int i = 0; i < nmods; i++) merged[k++] = mods[i];
+    for (int i = 0; i < n; i++) merged[k++] = decls[i];
+    if (g_nerrors == 0) typecheck_file(a, merged, k);
+    free(mods);
+    *ndecls = k;
+    return merged;
+}
+
+/* parse-only: formatter/doc need the AST but not typecheck or modules */
+static Decl **parse_only(Arena *a, const char *path, int *ndecls) {
+    size_t len;
+    char *src = read_all(path, &len);
+    if (!src) {
+        fprintf(stderr, "ralt: cannot read %s\n", path);
+        exit(2);
+    }
+    int ntoks;
+    Token *toks = lex_file(a, src, len, path, &ntoks);
+    Decl **decls = parse_file(a, toks, ntoks, path);
+    int n = 0;
+    while (decls && decls[n]) n++;
     *ndecls = n;
     return decls;
 }
@@ -119,13 +180,36 @@ static Decl **analyze_proj(Arena *a, const char *path, int *ndecls) {
     counts[ndeps] = nmain;
     nall += nmain;
 
-    Decl **merged = (Decl **)calloc(((size_t)nall + 1), sizeof *merged);
+    module_reset();
+    int nmods = 0, modcap = 0;
+    Decl **mods = NULL;
+    for (int i = 0; i <= ndeps; i++) {
+        const char *srcpath = i < ndeps ? deps[i] : path;
+        char base[1024];
+        dir_of(srcpath, base, sizeof base);
+        int mn = 0;
+        Decl **m = expand_modules(a, parts[i], counts[i], base, &mn);
+        for (int j = 0; j < mn; j++) {
+            if (nmods == modcap) {
+                modcap = modcap ? modcap * 2 : 16;
+                mods = realloc(mods, sizeof(Decl *) * (size_t)modcap);
+                if (!mods) exit(1);
+            }
+            mods[nmods++] = m[j];
+        }
+        free(m);
+    }
+
+    int total = nall + nmods;
+    Decl **merged = (Decl **)calloc(((size_t)total + 1), sizeof *merged);
     int k = 0;
+    for (int i = 0; i < nmods; i++) merged[k++] = mods[i];
     for (int i = ndeps; i >= 0; i--) {   /* main last: own names win prepass warns */
         for (int j = 0; j < counts[i]; j++) merged[k++] = parts[i][j];
     }
-    if (g_nerrors == 0) typecheck_file(a, merged, nall);
-    *ndecls = nall;
+    if (g_nerrors == 0) typecheck_file(a, merged, total);
+    *ndecls = total;
+    free(mods);
     deps_free(&deps, ndeps);
     free(parts);
     free(counts);
@@ -253,7 +337,7 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "fmt") == 0) {
         int ndecls;
-        Decl **decls = analyze(a, file, &ndecls);
+        Decl **decls = parse_only(a, file, &ndecls);
         if (g_nerrors > 0) {
             print_diags(false);
             fprintf(stderr, "ralt: %d error(s), cannot format\n", g_nerrors);
@@ -276,7 +360,7 @@ int main(int argc, char **argv) {
 
     if (strcmp(cmd, "doc") == 0) {
         int ndecls;
-        Decl **decls = analyze(a, file, &ndecls);
+        Decl **decls = parse_only(a, file, &ndecls);
         if (g_nerrors > 0) {
             print_diags(false);
             fprintf(stderr, "ralt: %d error(s), cannot emit docs\n", g_nerrors);

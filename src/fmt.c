@@ -328,9 +328,11 @@ void fmt_file(Arena *a, Decl **decls, int ndecls, FILE *out) {
         Decl *d = decls[i];
         if (d->kind == D_TIER) {
             fprintf(out, "use tier %s;\n", d->name);
+        } else if (d->kind == D_USEMOD) {
+            fprintf(out, "use \"%s\" as %s;\n", d->path, d->name);
         } else if (d->kind == D_FN) {
             FnDecl *fn = d->fn;
-            fprintf(out, "fn %s(", fn->name);
+            fprintf(out, "%sfn %s(", d->is_pub ? "pub " : "", fn->name);
             for (int k = 0; k < fn->nparams; k++) {
                 if (k) fputs(", ", out);
                 fprintf(out, "%s: ", fn->params[k].name);
@@ -347,7 +349,7 @@ void fmt_file(Arena *a, Decl **decls, int ndecls, FILE *out) {
             fputs("}\n", out);
         } else if (d->kind == D_STRUCT) {
             StDecl *st = d->st;
-            fprintf(out, "struct %s {\n", st->name);
+            fprintf(out, "%sstruct %s {\n", d->is_pub ? "pub " : "", st->name);
             for (int k = 0; k < st->nfields; k++) {
                 fprintf(out, "    %s: ", st->fields[k].name);
                 fm_tyname(&f, st->fields[k].ty, st->fields[k].tname);

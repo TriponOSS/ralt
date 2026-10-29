@@ -276,6 +276,13 @@ void parse_tree_dump(FILE *o, Decl **decls, int ndecls) {
             put_word(o, dl->name);
             fputc('\n', o);
             break;
+        case D_USEMOD:
+            put_word(o, "USEMOD ");
+            put_word(o, dl->name);
+            put_word(o, " path=");
+            put_word(o, dl->path);
+            fputc('\n', o);
+            break;
         case D_STRUCT:
             put_word(o, "STRUCT ");
             put_word(o, dl->st->name);

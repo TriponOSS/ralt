@@ -92,6 +92,10 @@ int  deps_lock(void);   /* write ralt.lock: name + content hash per dep */
 #define E0601 601
 #define E0602 602
 #define E0603 603
+#define E0701 701
+#define E0702 702
+#define E0703 703
+#define E0704 704
 
 /* name/hint table mirrors spec/errors.csv - keep in sync (generated later) */
 typedef struct {
@@ -121,6 +125,7 @@ typedef enum {
     TK_EQ, TK_NE, TK_LT, TK_GT, TK_LE, TK_GE,
     TK_AND, TK_OR, TK_NOT, TK_PLUS, TK_MINUS, TK_STAR, TK_SLASH,
     TK_PERCENT, TK_AMP, TK_QUESTION, TK_POW,
+    TK_AS,                  /* appended: module import alias */
 } TokKind;
 
 typedef struct {
@@ -315,14 +320,16 @@ struct FnDecl {
     Span span;
 };
 
-typedef enum { D_FN, D_TIER, D_USE, D_STRUCT, D_ENUM, D_LET } DeclKind;
+typedef enum { D_FN, D_TIER, D_USE, D_STRUCT, D_ENUM, D_LET, D_USEMOD } DeclKind;
 
 struct Decl {
     DeclKind kind;
     FnDecl *fn;
     StDecl *st;
     EnDecl *en;
-    const char *name;   /* tier name / global name */
+    const char *name;   /* tier name / global name / module alias */
+    const char *path;   /* D_USEMOD: imported file path */
+    bool is_pub;        /* D_FN/D_STRUCT/D_ENUM/D_LET exported */
     bool is_const;
     Ty ty;
     const char *tname;
@@ -380,5 +387,16 @@ void parse_tree_dump(FILE *o, Decl **decls, int ndecls);                 /* pars
 void native_file(Arena *a, Decl **decls, int ndecls, const char *outpath,
                  bool fast);                                             /* native.c */
 void lint_file(Arena *a, Decl **decls, int ndecls);                      /* lint.c */
+
+/* module.c - file modules: `use "path.tp" as alias;` (phase 1: functions) */
+void module_reset(void);
+void module_alias_add(const char *alias);
+bool module_alias_has(const char *alias);
+void module_pub_add(const char *alias, const char *name);
+bool module_pub_has(const char *alias, const char *name);
+/* Load a module, mangle its fns to alias__name, rewrite internal calls, and
+ * return the decls to fold into the translation unit. */
+Decl **module_expand(Arena *a, const char *path, const char *alias,
+                     const char *base_dir, Span sp, int *nout);
 
 #endif

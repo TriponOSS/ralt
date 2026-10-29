@@ -17,7 +17,7 @@ static const struct { const char *kw; TokKind k; } KEYWORDS[] = {
     {"if", TK_IF}, {"else", TK_ELSE}, {"while", TK_WHILE}, {"match", TK_MATCH},
     {"struct", TK_STRUCT}, {"enum", TK_ENUM}, {"use", TK_USE}, {"tier", TK_TIER},
     {"true", TK_TRUE}, {"false", TK_FALSE},
-    {"mut", TK_MUT}, {"pub", TK_PUB}, {"cast", TK_CAST},
+    {"mut", TK_MUT}, {"pub", TK_PUB}, {"cast", TK_CAST}, {"as", TK_AS},
 };
 
 static const struct { const char *op; TokKind k; } OPS[] = {
@@ -286,7 +286,7 @@ const char *tok_kind_word(TokKind k) {
         "'&&'", "'||'", "'!'", "'+'", "'-'", "'*'", "'/'", "'%'", "'&'", "'?'", "'**'",
     };
     if (k == TK_IDENT) return "identifier";
-    if (k >= TK_EOF && k <= TK_POW && WORDS[k]) return WORDS[k];
+    if (k >= TK_EOF && k <= TK_AS && WORDS[k]) return WORDS[k];
     return "token";
 }
 
