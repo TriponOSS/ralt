@@ -41,6 +41,9 @@ typedef enum {
     T_BCCZ,      /* if a == 0 goto label */
     T_BCCNZ,     /* if a != 0 goto label */
     T_LBL,       /* label: */
+    T_ALOAD,     /* dst = arr[a][idx b] (bounds E9002, aux = length) */
+    T_ASTORE,    /* arr[dst][idx a] = b (bounds E9002, aux = length) */
+    T_ACOPY,     /* copy imm bytes from arr a to arr dst (fixed size) */
 } TacOp;
 
 typedef struct {
@@ -57,6 +60,7 @@ typedef struct {
     int label;               /* T_LBL/T_BR/T_BCCZ/T_BCCNZ */
     int print_kind;          /* T_PRINT: 0=i32, 1=i64, 2=str, 3=f64 */
     int strid;               /* T_LEASTR */
+    int aux;                 /* T_ALOAD/T_ASTORE: array length */
     double flo, fhi;         /* f2i/f2u guard bounds (E9004) */
 } Tac;
 
@@ -67,6 +71,8 @@ typedef struct {
     int crosses_call, crosses_div;
     int reg;                 /* phys reg index or -1 (spill) */
     int slot;                /* frame slot (1:1 with vreg id) */
+    int abytes;              /* aggregate storage bytes (0 for scalars) */
+    int aoff;                /* aggregate base offset from rbp (negative) */
     const char *varname;     /* locals carry their Tripon name */
 } VReg;
 
@@ -139,6 +145,21 @@ static int vreg_new(FnCg *f, Ty ty) {
 
 static int lbl_new(FnCg *f) { return f->nlbl++; }
 
+/* Fixed arrays are stored as 8-byte canonical cells per element, so the frame
+ * size is len*8 regardless of the declared element width. */
+static int array_cells(const char *tname, int *len) {
+    ArrayInfo *ai = tname ? array_find(tname) : NULL;
+    if (!ai || ai->len <= 0) return 0;
+    if (len) *len = ai->len;
+    return ai->len;
+}
+
+static int vreg_new_array(FnCg *f, int len) {
+    int v = vreg_new(f, TY_ARRAY);
+    f->v[v].abytes = len * 8;
+    return v;
+}
+
 /* ---------------- type classification ---------------- */
 
 static bool ty_signed(Ty t) {
@@ -148,8 +169,8 @@ static bool ty_unsig(Ty t) {
     return t == TY_U8 || t == TY_U16 || t == TY_U32 || t == TY_U64 || t == TY_USIZE;
 }
 static bool ty_ok(Ty t) {
-    return ty_is_int(t) || t == TY_BOOL || t == TY_STR || t == TY_VOID ||
-           t == TY_UNSET || t == TY_STRUCT || t == TY_ARRAY ||
+    return ty_is_int(t) || ty_is_float(t) || t == TY_BOOL || t == TY_STR ||
+           t == TY_VOID || t == TY_UNSET || t == TY_STRUCT || t == TY_ARRAY ||
            t == TY_ENUM || t == TY_OPT || t == TY_RESULT;
 }
 static void reject_slice(void) {
@@ -337,6 +358,8 @@ static int ev_expr(FnCg *f, Ctx *c, Expr *e) {
         if (op == TK_OR) return ev_logic(f, c, e, true);
         Ty bt = e->lhs->ty == TY_UNSET ? e->rhs->ty : e->lhs->ty;
         bool bf = ty_is_float(bt);
+        if ((op == TK_EQ || op == TK_NE) && bf)
+            return ev_cmp(f, c, e);   /* float equality: unordered semantics */
         if ((op == TK_EQ || op == TK_NE) && !bf) {
             if (e->lhs->ty == TY_STR) {
                 /* strcmp(a, b) == 0 */
@@ -405,6 +428,14 @@ static int ev_expr(FnCg *f, Ctx *c, Expr *e) {
             return -1;
         }
         if (strcmp(e->callee, "len") == 0) {
+            if (e->args[0]->ty == TY_ARRAY) {
+                int len = 0;
+                array_cells(e->args[0]->tname, &len);
+                if (len <= 0) reject_slice();
+                int d = vreg_new(f, TY_I32);
+                tac_add(f, (Tac){.op = T_LI, .dst = d, .imm = len, .ty = TY_I32});
+                return d;
+            }
             if (e->args[0]->ty != TY_STR) reject_slice();
             int a = ev_expr(f, c, e->args[0]);
             int *argv = xmalloc(sizeof(int));
@@ -438,6 +469,17 @@ static int ev_expr(FnCg *f, Ctx *c, Expr *e) {
         return d;
     }
     case EX_INDEX: {
+        if (e->base->ty == TY_ARRAY) {
+            ArrayInfo *ai = e->base->tname ? array_find(e->base->tname) : NULL;
+            if (!ai) reject_slice();
+            int b = ev_expr(f, c, e->base);
+            int i = ev_expr(f, c, e->index);
+            int d = vreg_new(f, ai->elem_ty);
+            tac_add(f, (Tac){.op = T_ALOAD, .dst = d, .a = b, .b = i,
+                             .aux = ai->len, .ty = ai->elem_ty,
+                             .file = e->span.file, .line = e->span.line});
+            return d;
+        }
         if (e->base->ty != TY_STR) reject_slice();
         int s = ev_expr(f, c, e->base);
         int i = ev_expr(f, c, e->index);
@@ -458,6 +500,20 @@ static void ev_stmt(FnCg *f, Ctx *c, Stmt *s) {
     switch (s->kind) {
     case ST_LET: {
         if (!ty_ok(s->ty)) reject_ty(s->ty);
+        if (s->ty == TY_ARRAY) {
+            int len = 0;
+            array_cells(s->tname, &len);
+            if (len <= 0) reject_slice();
+            int v = vreg_new_array(f, len);
+            f->v[v].varname = s->name;
+            if (s->init) {
+                if (s->init->ty != TY_ARRAY) reject_slice();
+                int x = ev_expr(f, c, s->init);
+                tac_add(f, (Tac){.op = T_ACOPY, .dst = v, .a = x,
+                                 .imm = len * 8});
+            }
+            break;
+        }
         int v = vreg_new(f, s->ty);
         f->v[v].varname = s->name;
         if (s->init) {
@@ -471,11 +527,56 @@ static void ev_stmt(FnCg *f, Ctx *c, Stmt *s) {
         break;
     }
     case ST_ASSIGN: {
+        /* a[i] = v / a[i] op= v */
+        if (s->target->kind == EX_INDEX && s->target->base->ty == TY_ARRAY) {
+            Expr *bexp = s->target->base;
+            if (bexp->kind != EX_IDENT) reject_slice();
+            ArrayInfo *ai = bexp->tname ? array_find(bexp->tname) : NULL;
+            if (!ai) reject_slice();
+            int b = find_local(f, bexp->sval);
+            if (b < 0) {
+                fprintf(stderr, "ralt native: unknown local '%s'\n", bexp->sval);
+                exit(1);
+            }
+            int idx = ev_expr(f, c, s->target->index);
+            if (s->aop == TK_ASSIGN) {
+                int val = ev_expr(f, c, s->value);
+                tac_add(f, (Tac){.op = T_ASTORE, .dst = b, .a = idx, .b = val,
+                                 .aux = ai->len, .ty = ai->elem_ty,
+                                 .file = s->span.file, .line = s->span.line});
+            } else {
+                TokKind op = s->aop == TK_ADDEQ ? TK_PLUS
+                           : s->aop == TK_SUBEQ ? TK_MINUS
+                           : s->aop == TK_MULEQ ? TK_STAR
+                           : s->aop == TK_DIVEQ ? TK_SLASH : TK_PERCENT;
+                int cur = vreg_new(f, ai->elem_ty);
+                tac_add(f, (Tac){.op = T_ALOAD, .dst = cur, .a = b, .b = idx,
+                                 .aux = ai->len, .ty = ai->elem_ty,
+                                 .file = s->span.file, .line = s->span.line});
+                int val = ev_expr(f, c, s->value);
+                int res = vreg_new(f, ai->elem_ty);
+                tac_add(f, (Tac){.op = T_BIN, .dst = res, .a = cur, .b = val,
+                                 .tok = op, .ty = ai->elem_ty,
+                                 .file = s->span.file, .line = s->span.line});
+                tac_add(f, (Tac){.op = T_ASTORE, .dst = b, .a = idx, .b = res,
+                                 .aux = ai->len, .ty = ai->elem_ty,
+                                 .file = s->span.file, .line = s->span.line});
+            }
+            break;
+        }
         if (s->target->kind != EX_IDENT) reject_slice();   /* fields: P4.3 */
         int v = find_local(f, s->target->sval);
         if (v < 0) {
             fprintf(stderr, "ralt native: unknown local '%s'\n", s->target->sval);
             exit(1);
+        }
+        if (f->v[v].ty == TY_ARRAY) {
+            if (s->aop != TK_ASSIGN) reject_slice();
+            int x = ev_expr(f, c, s->value);
+            if (x < 0 || f->v[x].ty != TY_ARRAY) reject_slice();
+            tac_add(f, (Tac){.op = T_ACOPY, .dst = v, .a = x,
+                             .imm = f->v[v].abytes});
+            break;
         }
         if (s->aop == TK_ASSIGN) {
             int x = ev_expr(f, c, s->value);
@@ -595,6 +696,8 @@ static void fn_alloc(FnCg *f) {
 
     for (int i = 0; i < f->nv; i++) {
         VReg *r = &order[i];
+        /* aggregates are memory-only: never register-allocated */
+        if (r->abytes > 0) { r->reg = -1; continue; }
         /* expire intervals that ended before this def */
         for (int j = 0; j < nactive; j++) {
             if (active[j]->last < r->def) {
@@ -638,7 +741,8 @@ static void fn_alloc(FnCg *f) {
     }
     if (getenv("TP_TAC")) {
         static const char *OPN[] = {"LI", "LEASTR", "MOV", "BIN", "CMP", "CAST",
-            "NEG", "NOT", "CALL", "PRINT", "STRIDX", "RET", "BR", "BCCZ", "BCCNZ", "LBL"};
+            "NEG", "NOT", "CALL", "PRINT", "STRIDX", "RET", "BR", "BCCZ", "BCCNZ",
+            "LBL", "ALOAD", "ASTORE", "ACOPY"};
         for (int p = 0; p < f->n; p++) {
             Tac *t = &f->t[p];
             fprintf(stderr, "%3d %-7s d=%d a=%d b=%d", p, OPN[t->op], t->dst, t->a, t->b);
@@ -807,12 +911,12 @@ static void emit_f2i(Em *e, Tac *t) {
     int bid = strtab_add(e->c, (const char *)blob, (int)(bw * 2));
     P(e, "\tleaq .Lstr%d(%%rip), %%r10", bid);
     P(e, "\tmov%s %s, %%xmm0", cm, slot_by_id(f->v[t->a].slot));
-    P(e, "\tucomis%s (%%r10), %%xmm0", cm);          /* v vs lo */
+    P(e, "\t%s (%%r10), %%xmm0", is32 ? "ucomiss" : "ucomisd"); /* v vs lo */
     int s1 = site_get(e, 9004, t->file, t->line);
     P(e, "\tjae 1f");                                /* v >= lo (NaN fails) */
     P(e, "\tjmp .Lts%d", s1);
     P(e, "1:");
-    P(e, "\tucomis%s %d(%%r10), %%xmm0", cm, (int)bw); /* v vs hiex */
+    P(e, "\t%s %d(%%r10), %%xmm0", is32 ? "ucomiss" : "ucomisd", (int)bw); /* v vs hiex */
     int s2 = site_get(e, 9004, t->file, t->line);
     P(e, "\tjb 2f");                                 /* v < hiex */
     P(e, "\tjmp .Lts%d", s2);
@@ -955,7 +1059,7 @@ static void emit_fcmp(Em *e, Tac *t) {
     FnCg *f = e->f;
     bool is32 = f->v[t->a].ty == TY_F32;
     P(e, "\tmov%s %s, %%xmm0", is32 ? "ss" : "sd", slot_by_id(f->v[t->a].slot));
-    P(e, "\tucomis%s %s, %%xmm0", is32 ? "ss" : "sd", slot_by_id(f->v[t->b].slot));
+    P(e, "\t%s %s, %%xmm0", is32 ? "ucomiss" : "ucomisd", slot_by_id(f->v[t->b].slot));
     switch (t->tok) {
     case TK_EQ:
         P(e, "\tsete %%al");
@@ -1286,6 +1390,42 @@ static void emit_tac(Em *e, Tac *t) {
         store_rax(e, t->dst);
         break;
     }
+    case T_ALOAD: {
+        /* bounds: idx < 0 || idx >= len -> E9002 (mirrors tp_bounds_g) */
+        int s1 = site_get(e, 9002, t->file, t->line);
+        int s2 = site_get(e, 9002, t->file, t->line);
+        P(e, "\tcmpq $0, %s", loc_of(e, t->b));
+        P(e, "\tjl .Lts%d", s1);
+        P(e, "\tcmpq $%d, %s", t->aux, loc_of(e, t->b));
+        P(e, "\tjge .Lts%d", s2);
+        P(e, "\tleaq %d(%%rbp), %%r10", f->v[t->a].aoff);
+        P(e, "\tmovq %s, %%r11", loc_of(e, t->b));
+        P(e, "\tmovq (%%r10,%%r11,8), %%rax");
+        store_rax(e, t->dst);
+        break;
+    }
+    case T_ASTORE: {
+        int s1 = site_get(e, 9002, t->file, t->line);
+        int s2 = site_get(e, 9002, t->file, t->line);
+        P(e, "\tcmpq $0, %s", loc_of(e, t->a));
+        P(e, "\tjl .Lts%d", s1);
+        P(e, "\tcmpq $%d, %s", t->aux, loc_of(e, t->a));
+        P(e, "\tjge .Lts%d", s2);
+        P(e, "\tleaq %d(%%rbp), %%r10", f->v[t->dst].aoff);
+        P(e, "\tmovq %s, %%r11", loc_of(e, t->a));
+        P(e, "\tleaq (%%r10,%%r11,8), %%r11");
+        P(e, "\tmovq %s, %%r10", loc_of(e, t->b));
+        P(e, "\tmovq %%r10, (%%r11)");
+        break;
+    }
+    case T_ACOPY: {
+        /* fixed size: unrolled 8-byte moves through the reserved r10 */
+        for (int off = 0; off < t->imm; off += 8) {
+            P(e, "\tmovq %d(%%rbp), %%r10", f->v[t->a].aoff + off);
+            P(e, "\tmovq %%r10, %d(%%rbp)", f->v[t->dst].aoff + off);
+        }
+        break;
+    }
     case T_CALL:
         emit_call(e, t, t->is_extern ? t->callee : tpname(t->callee));
         break;
@@ -1331,7 +1471,15 @@ static void emit_fn(Em *e, FnCg *f, FnDecl *fn) {
     P(e, "%s:", nm);
     P(e, "\tpushq %%rbp");
     P(e, "\tmovq %%rsp, %%rbp");
-    int framesz = (8 * f->nv + 15) & ~15;
+    int scalar_bytes = 8 * f->nv;
+    int agg_used = 0;
+    for (int i = 0; i < f->nv; i++) {
+        if (f->v[i].abytes <= 0) continue;
+        agg_used += f->v[i].abytes;
+        f->v[i].aoff = -(scalar_bytes + agg_used);
+    }
+    int total_bytes = scalar_bytes + agg_used;
+    int framesz = (total_bytes + 15) & ~15;
     /* params first: ints canonicalize through rax into their GPR or slot;
      * floats come in on the xmm queue and go straight to their slot */
     int gi = 0, xi = 0;
@@ -1350,12 +1498,12 @@ static void emit_fn(Em *e, FnCg *f, FnDecl *fn) {
             P(e, "\tmovq %%rax, %s", slot_by_id(f->v[i].slot));
         gi++;
     }
-    if (f->nv > 0) {
+    if (total_bytes > 0) {
         /* zero the frame with reserved regs only (r10/r11): allocated
          * scratch regs may already hold param values */
         P(e, "\tsubq $%d, %%rsp", framesz);
         P(e, "\tleaq -%d(%%rbp), %%r10", framesz);
-        P(e, "\tmovq $%d, %%r11", f->nv);
+        P(e, "\tmovq $%d, %%r11", total_bytes / 8);
         P(e, ".Lz%d:", e->epiid);
         P(e, "\tmovq $0, (%%r10)");
         P(e, "\taddq $8, %%r10");
