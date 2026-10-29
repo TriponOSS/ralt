@@ -383,20 +383,7 @@ int main(int argc, char **argv) {
             const char *cc = getenv("CC");
             if (!cc || !*cc) cc = "cc";
             execlp(cc, cc, "-std=c99", ofast ? "-O2" : "-O0",
-                   "-I/usr/include/webkitgtk-4.1",
-                   "-I/usr/include/gtk-3.0",
-                   "-I/usr/include/glib-2.0",
-                   "-I/usr/lib/glib-2.0/include",
-                   "-I/usr/include/pango-1.0",
-                   "-I/usr/include/harfbuzz",
-                   "-I/usr/include/libsoup-3.0",
-                   "-I/usr/include/cairo",
-                   "-I/usr/include/gdk-pixbuf-2.0",
-                   "-I/usr/include/atk-1.0",
-                   "-o", binpath, cpath, "-lm",
-                   "-lgtk-3", "-lgdk-3", "-lwebkit2gtk-4.1",
-                   "-ljavascriptcoregtk-4.1", "-lgio-2.0",
-                   "-lgobject-2.0", "-lglib-2.0", (char *)NULL);
+                   "-o", binpath, cpath, "-lm", (char *)NULL);
             fprintf(stderr, "ralt: failed to exec %s (is a C toolchain installed?)\n", cc);
             _exit(127);
         }
