@@ -44,6 +44,10 @@ typedef enum {
     T_ALOAD,     /* dst = arr[a][idx b] (bounds E9002, aux = length) */
     T_ASTORE,    /* arr[dst][idx a] = b (bounds E9002, aux = length) */
     T_ACOPY,     /* copy imm bytes from arr a to arr dst (fixed size) */
+    T_FLOAD,     /* dst = *(agg a + imm) */
+    T_FSTORE,    /* *(agg dst + imm) = a */
+    T_SCOPY,     /* copy imm bytes: agg a[soff] -> agg dst[doff] */
+    T_SCOPY_PTR, /* copy imm bytes: agg a[soff] -> *(ptr in dst) */
 } TacOp;
 
 typedef struct {
@@ -61,6 +65,7 @@ typedef struct {
     int print_kind;          /* T_PRINT: 0=i32, 1=i64, 2=str, 3=f64 */
     int strid;               /* T_LEASTR */
     int aux;                 /* T_ALOAD/T_ASTORE: array length */
+    int doff, soff;          /* T_SCOPY byte offsets */
     double flo, fhi;         /* f2i/f2u guard bounds (E9004) */
 } Tac;
 
@@ -73,6 +78,7 @@ typedef struct {
     int slot;                /* frame slot (1:1 with vreg id) */
     int abytes;              /* aggregate storage bytes (0 for scalars) */
     int aoff;                /* aggregate base offset from rbp (negative) */
+    int pinned;              /* never register-allocated (hidden return ptr) */
     const char *varname;     /* locals carry their Tripon name */
 } VReg;
 
@@ -83,6 +89,7 @@ typedef struct {
     int nv, vcap;
     int nlbl;
     FnDecl *fn;              /* owning decl (emission pairing) */
+    int retptr;              /* hidden struct-return pointer vreg, -1 if none */
     const char *file;
 } FnCg;
 
@@ -92,6 +99,8 @@ typedef struct {
     char **strs;             /* rodata blobs, file-wide, appearance order */
     int *strlens;
     int nstrs, strcap;
+    StDecl **structs;        /* struct layout lookup */
+    int nstructs;
     bool fast;
 } Ctx;
 
@@ -158,6 +167,82 @@ static int vreg_new_array(FnCg *f, int len) {
     int v = vreg_new(f, TY_ARRAY);
     f->v[v].abytes = len * 8;
     return v;
+}
+
+static int vreg_new_agg(FnCg *f, Ty ty, int bytes) {
+    int v = vreg_new(f, ty);
+    f->v[v].abytes = bytes;
+    return v;
+}
+
+/* ---- struct layout (8-byte aligned fields, no padding tricks) ---- */
+
+static int find_local(FnCg *f, const char *name);
+
+static StDecl *st_find(Ctx *c, const char *name) {
+    if (!name) return NULL;
+    for (int i = 0; i < c->nstructs; i++)
+        if (strcmp(c->structs[i]->name, name) == 0) return c->structs[i];
+    return NULL;
+}
+
+static StField *st_field(Ctx *c, StDecl *st, const char *name) {
+    (void)c;
+    if (!st) return NULL;
+    for (int i = 0; i < st->nfields; i++)
+        if (strcmp(st->fields[i].name, name) == 0) return &st->fields[i];
+    return NULL;
+}
+
+static int ty_bytes(Ctx *c, Ty t, const char *tname) {
+    if (t == TY_ARRAY) {
+        ArrayInfo *ai = tname ? array_find(tname) : NULL;
+        return ai && ai->len > 0 ? ai->len * 8 : 8;
+    }
+    if (t == TY_STRUCT) {
+        StDecl *st = st_find(c, tname);
+        if (st) {
+            int total = 0;
+            for (int i = 0; i < st->nfields; i++)
+                total += ty_bytes(c, st->fields[i].ty, st->fields[i].tname);
+            return total > 0 ? total : 8;
+        }
+        return 8;
+    }
+    return 8;
+}
+
+static int st_field_off(Ctx *c, StDecl *st, const char *name) {
+    int off = 0;
+    for (int i = 0; i < st->nfields; i++) {
+        if (strcmp(st->fields[i].name, name) == 0) return off;
+        off += ty_bytes(c, st->fields[i].ty, st->fields[i].tname);
+    }
+    return -1;
+}
+
+/* Resolve an lvalue expression to (aggregate vreg, byte offset). Supports
+ * identifiers and nested fields; array elements are a later slice. */
+static bool resolve_addr(FnCg *f, Ctx *c, Expr *e, int *vout, int *off) {
+    if (e->kind == EX_IDENT) {
+        int v = find_local(f, e->sval);
+        if (v < 0) return false;
+        *vout = v;
+        *off = 0;
+        return true;
+    }
+    if (e->kind == EX_FIELD) {
+        int bv = 0, boff = 0;
+        if (!resolve_addr(f, c, e->base, &bv, &boff)) return false;
+        StDecl *st = st_find(c, e->base->tname);
+        if (!st) return false;
+        int fo = st_field_off(c, st, e->sval);
+        if (fo < 0) return false;
+        *vout = bv;
+        *off = boff + fo;
+        return true;
+    }
+    return false;
 }
 
 /* ---------------- type classification ---------------- */
@@ -455,17 +540,70 @@ static int ev_expr(FnCg *f, Ctx *c, Expr *e) {
                 if (!ty_ok(fn->params[i].ty)) reject_ty(fn->params[i].ty);
             if (!ty_ok(fn->ret)) reject_ty(fn->ret);
         }
-        if (e->nargs > 6) {
+        /* struct return: hidden destination pointer becomes int arg 0 */
+        int retagg = -1;
+        if (fn && fn->ret == TY_STRUCT)
+            retagg = vreg_new_agg(f, TY_STRUCT,
+                                  ty_bytes(c, TY_STRUCT, fn->retname));
+        int argc2 = e->nargs + (retagg >= 0 ? 1 : 0);
+        if (argc2 > 6) {
             fprintf(stderr, "ralt native: >6 scalar args unsupported in P4.1\n");
             exit(1);
         }
         if (e->ty != TY_VOID && !ty_ok(e->ty)) reject_ty(e->ty);
-        int d = e->ty == TY_VOID ? -1 : vreg_new(f, e->ty);
-        int *argv = xmalloc(sizeof(int) * (size_t)(e->nargs ? e->nargs : 1));
-        for (int i = 0; i < e->nargs; i++) argv[i] = ev_expr(f, c, e->args[i]);
+        int d;
+        if (retagg >= 0) d = retagg;
+        else d = e->ty == TY_VOID ? -1 : vreg_new(f, e->ty);
+        int *argv = xmalloc(sizeof(int) * (size_t)(argc2 ? argc2 : 1));
+        int k = 0;
+        if (retagg >= 0) argv[k++] = retagg;
+        for (int i = 0; i < e->nargs; i++) argv[k++] = ev_expr(f, c, e->args[i]);
         tac_add(f, (Tac){.op = T_CALL, .dst = d, .callee = e->callee,
                          .is_extern = is_extern ? 1 : 0, .argv = argv,
-                         .argc = e->nargs, .ty = e->ty});
+                         .argc = argc2, .ty = retagg >= 0 ? TY_STRUCT : e->ty});
+        return d;
+    }
+    case EX_STRUCTINIT: {
+        StDecl *st = st_find(c, e->sval ? e->sval : e->tname);
+        if (!st) reject_slice();
+        int bytes = 0;
+        for (int i = 0; i < st->nfields; i++)
+            bytes += ty_bytes(c, st->fields[i].ty, st->fields[i].tname);
+        int v = vreg_new_agg(f, TY_STRUCT, bytes);
+        for (int i = 0; i < e->nargs; i++) {
+            const char *fname = e->inames ? e->inames[i] : NULL;
+            StField *fld = st_field(c, st, fname);
+            if (!fld) reject_slice();
+            int off = st_field_off(c, st, fname);
+            if (off < 0) reject_slice();
+            int val = ev_expr(f, c, e->args[i]);
+            if (fld->ty == TY_STRUCT || fld->ty == TY_ARRAY) {
+                int n = ty_bytes(c, fld->ty, fld->tname);
+                tac_add(f, (Tac){.op = T_SCOPY, .dst = v, .a = val, .imm = n,
+                                 .doff = off, .soff = 0});
+            } else {
+                tac_add(f, (Tac){.op = T_FSTORE, .dst = v, .a = val, .imm = off,
+                                 .ty = fld->ty});
+            }
+        }
+        return v;
+    }
+    case EX_FIELD: {
+        int bv = 0, off = 0;
+        if (!resolve_addr(f, c, e, &bv, &off)) reject_slice();
+        StDecl *st = st_find(c, e->base->tname);
+        StField *fld = st_field(c, st, e->sval);
+        if (!fld) reject_slice();
+        if (fld->ty == TY_STRUCT || fld->ty == TY_ARRAY) {
+            int n = ty_bytes(c, fld->ty, fld->tname);
+            int t = vreg_new_agg(f, fld->ty, n);
+            tac_add(f, (Tac){.op = T_SCOPY, .dst = t, .a = bv, .imm = n,
+                             .doff = 0, .soff = off});
+            return t;
+        }
+        int d = vreg_new(f, fld->ty);
+        tac_add(f, (Tac){.op = T_FLOAD, .dst = d, .a = bv, .imm = off,
+                         .ty = fld->ty});
         return d;
     }
     case EX_INDEX: {
@@ -514,6 +652,17 @@ static void ev_stmt(FnCg *f, Ctx *c, Stmt *s) {
             }
             break;
         }
+        if (s->ty == TY_STRUCT) {
+            int bytes = ty_bytes(c, TY_STRUCT, s->tname);
+            int v = vreg_new_agg(f, TY_STRUCT, bytes);
+            f->v[v].varname = s->name;
+            if (s->init) {
+                int x = ev_expr(f, c, s->init);
+                tac_add(f, (Tac){.op = T_SCOPY, .dst = v, .a = x, .imm = bytes,
+                                 .doff = 0, .soff = 0});
+            }
+            break;
+        }
         int v = vreg_new(f, s->ty);
         f->v[v].varname = s->name;
         if (s->init) {
@@ -527,6 +676,43 @@ static void ev_stmt(FnCg *f, Ctx *c, Stmt *s) {
         break;
     }
     case ST_ASSIGN: {
+        /* field assignment: base.field = v / base.field op= v */
+        if (s->target->kind == EX_FIELD) {
+            int bv = 0, off = 0;
+            if (!resolve_addr(f, c, s->target, &bv, &off)) reject_slice();
+            StDecl *st = st_find(c, s->target->base->tname);
+            StField *fld = st_field(c, st, s->target->sval);
+            if (!fld) reject_slice();
+            if (fld->ty == TY_STRUCT || fld->ty == TY_ARRAY) {
+                if (s->aop != TK_ASSIGN) reject_slice();
+                int x = ev_expr(f, c, s->value);
+                int n = ty_bytes(c, fld->ty, fld->tname);
+                tac_add(f, (Tac){.op = T_SCOPY, .dst = bv, .a = x, .imm = n,
+                                 .doff = off, .soff = 0});
+                break;
+            }
+            if (s->aop == TK_ASSIGN) {
+                int val = ev_expr(f, c, s->value);
+                tac_add(f, (Tac){.op = T_FSTORE, .dst = bv, .a = val, .imm = off,
+                                 .ty = fld->ty});
+            } else {
+                TokKind op = s->aop == TK_ADDEQ ? TK_PLUS
+                           : s->aop == TK_SUBEQ ? TK_MINUS
+                           : s->aop == TK_MULEQ ? TK_STAR
+                           : s->aop == TK_DIVEQ ? TK_SLASH : TK_PERCENT;
+                int cur = vreg_new(f, fld->ty);
+                tac_add(f, (Tac){.op = T_FLOAD, .dst = cur, .a = bv, .imm = off,
+                                 .ty = fld->ty});
+                int val = ev_expr(f, c, s->value);
+                int res = vreg_new(f, fld->ty);
+                tac_add(f, (Tac){.op = T_BIN, .dst = res, .a = cur, .b = val,
+                                 .tok = op, .ty = fld->ty,
+                                 .file = s->span.file, .line = s->span.line});
+                tac_add(f, (Tac){.op = T_FSTORE, .dst = bv, .a = res, .imm = off,
+                                 .ty = fld->ty});
+            }
+            break;
+        }
         /* a[i] = v / a[i] op= v */
         if (s->target->kind == EX_INDEX && s->target->base->ty == TY_ARRAY) {
             Expr *bexp = s->target->base;
@@ -570,6 +756,14 @@ static void ev_stmt(FnCg *f, Ctx *c, Stmt *s) {
             fprintf(stderr, "ralt native: unknown local '%s'\n", s->target->sval);
             exit(1);
         }
+        if (f->v[v].ty == TY_STRUCT) {
+            if (s->aop != TK_ASSIGN) reject_slice();
+            int x = ev_expr(f, c, s->value);
+            if (x < 0 || f->v[x].ty != TY_STRUCT) reject_slice();
+            tac_add(f, (Tac){.op = T_SCOPY, .dst = v, .a = x,
+                             .imm = f->v[v].abytes, .doff = 0, .soff = 0});
+            break;
+        }
         if (f->v[v].ty == TY_ARRAY) {
             if (s->aop != TK_ASSIGN) reject_slice();
             int x = ev_expr(f, c, s->value);
@@ -595,7 +789,14 @@ static void ev_stmt(FnCg *f, Ctx *c, Stmt *s) {
     case ST_RETURN: {
         if (s->value) {
             int x = ev_expr(f, c, s->value);
-            tac_add(f, (Tac){.op = T_RET, .a = x});
+            if (f->retptr >= 0 && f->v[x].ty == TY_STRUCT) {
+                int bytes = ty_bytes(c, TY_STRUCT, f->fn->retname);
+                tac_add(f, (Tac){.op = T_SCOPY_PTR, .dst = f->retptr, .a = x,
+                                 .imm = bytes, .soff = 0});
+                tac_add(f, (Tac){.op = T_RET, .a = -1});
+            } else {
+                tac_add(f, (Tac){.op = T_RET, .a = x});
+            }
         } else {
             tac_add(f, (Tac){.op = T_RET, .a = -1});
         }
@@ -697,7 +898,7 @@ static void fn_alloc(FnCg *f) {
     for (int i = 0; i < f->nv; i++) {
         VReg *r = &order[i];
         /* aggregates are memory-only: never register-allocated */
-        if (r->abytes > 0) { r->reg = -1; continue; }
+        if (r->abytes > 0 || r->pinned) { r->reg = -1; continue; }
         /* expire intervals that ended before this def */
         for (int j = 0; j < nactive; j++) {
             if (active[j]->last < r->def) {
@@ -740,9 +941,10 @@ static void fn_alloc(FnCg *f) {
                     f->v[i].slot, f->v[i].varname ? f->v[i].varname : "");
     }
     if (getenv("TP_TAC")) {
-        static const char *OPN[] = {"LI", "LEASTR", "MOV", "BIN", "CMP", "CAST",
+        static const char *OPN[] = {"LI", "FLTI", "LEASTR", "MOV", "BIN", "CMP", "CAST",
             "NEG", "NOT", "CALL", "PRINT", "STRIDX", "RET", "BR", "BCCZ", "BCCNZ",
-            "LBL", "ALOAD", "ASTORE", "ACOPY"};
+            "LBL", "ALOAD", "ASTORE", "ACOPY", "FLOAD", "FSTORE", "SCOPY",
+            "SCOPYPTR"};
         for (int p = 0; p < f->n; p++) {
             Tac *t = &f->t[p];
             fprintf(stderr, "%3d %-7s d=%d a=%d b=%d", p, OPN[t->op], t->dst, t->a, t->b);
@@ -1124,7 +1326,7 @@ static void emit_cmp(Em *e, Tac *t) {
 
 static void emit_call(Em *e, Tac *t, const char *name) {
     FnCg *f = e->f;
-    enum { K_REG, K_SLOT, K_R10, K_R11, K_STACK };
+    enum { K_REG, K_SLOT, K_R10, K_R11, K_STACK, K_AGG };
     /* SysV: int args take GPRs in appearance order, float args take
      * xmm0..7 in appearance order - two independent queues. */
     int kind[6], loc[6];          /* int-subset machinery */
@@ -1135,12 +1337,16 @@ static void emit_call(Em *e, Tac *t, const char *name) {
     }
     for (int k = 0; k < nint; k++) {
         int i = intv[k];
-        if (f->v[t->argv[i]].reg >= 0) {
+        int v = t->argv[i];
+        if (f->v[v].abytes > 0) {
+            kind[k] = K_AGG;      /* pass the address of the aggregate */
+            loc[k] = v;
+        } else if (f->v[v].reg >= 0) {
             kind[k] = K_REG;
-            loc[k] = f->v[t->argv[i]].reg;
+            loc[k] = f->v[v].reg;
         } else {
             kind[k] = K_SLOT;
-            loc[k] = f->v[t->argv[i]].slot;
+            loc[k] = f->v[v].slot;
         }
     }
     /* phase 1 - decide: placing int arg k into GPR[k] destroys any later
@@ -1178,6 +1384,9 @@ static void emit_call(Em *e, Tac *t, const char *name) {
             P(e, "\tmovq %s, %s", from, W64[target]);
             break;
         }
+        case K_AGG:
+            P(e, "\tleaq %d(%%rbp), %s", f->v[loc[k]].aoff, W64[target]);
+            break;
         case K_R10: P(e, "\tmovq %%r10, %s", W64[target]); break;
         case K_R11: P(e, "\tmovq %%r11, %s", W64[target]); break;
         default: break;   /* K_STACK: popped below */
@@ -1202,6 +1411,8 @@ static void emit_call(Em *e, Tac *t, const char *name) {
     P(e, "\tcall %s", name);
     if (t->dst < 0)
         return;
+    if (f->v[t->dst].abytes > 0)
+        return;   /* aggregate return already written through the hidden ptr */
     if (ty_is_float(t->ty)) {
         P(e, "\tmov%s %%xmm0, %s", t->ty == TY_F64 ? "sd" : "ss",
           slot_by_id(f->v[t->dst].slot));
@@ -1426,6 +1637,34 @@ static void emit_tac(Em *e, Tac *t) {
         }
         break;
     }
+    case T_FLOAD: {
+        P(e, "\tmovq %d(%%rbp), %%rax", f->v[t->a].aoff + t->imm);
+        store_rax(e, t->dst);
+        break;
+    }
+    case T_FSTORE: {
+        P(e, "\tmovq %s, %%r10", loc_of(e, t->a));
+        P(e, "\tmovq %%r10, %d(%%rbp)", f->v[t->dst].aoff + t->imm);
+        break;
+    }
+    case T_SCOPY: {
+        for (int off = 0; off < t->imm; off += 8) {
+            P(e, "\tmovq %d(%%rbp), %%r10",
+              f->v[t->a].aoff + t->soff + off);
+            P(e, "\tmovq %%r10, %d(%%rbp)",
+              f->v[t->dst].aoff + t->doff + off);
+        }
+        break;
+    }
+    case T_SCOPY_PTR: {
+        P(e, "\tmovq %s, %%r11", loc_of(e, t->dst));
+        for (int off = 0; off < t->imm; off += 8) {
+            P(e, "\tmovq %d(%%rbp), %%r10",
+              f->v[t->a].aoff + t->soff + off);
+            P(e, "\tmovq %%r10, %d(%%r11)", off);
+        }
+        break;
+    }
     case T_CALL:
         emit_call(e, t, t->is_extern ? t->callee : tpname(t->callee));
         break;
@@ -1480,27 +1719,9 @@ static void emit_fn(Em *e, FnCg *f, FnDecl *fn) {
     }
     int total_bytes = scalar_bytes + agg_used;
     int framesz = (total_bytes + 15) & ~15;
-    /* params first: ints canonicalize through rax into their GPR or slot;
-     * floats come in on the xmm queue and go straight to their slot */
-    int gi = 0, xi = 0;
-    for (int i = 0; i < fn->nparams; i++) {
-        Ty pty = fn->params[i].ty;
-        if (ty_is_float(pty)) {
-            P(e, "\tmov%s %%xmm%d, %s", pty == TY_F64 ? "sd" : "ss", xi,
-              slot_by_id(f->v[i].slot));
-            xi++;
-            continue;
-        }
-        extend_rax(e, pty, ARGREG[gi], NULL);
-        if (f->v[i].reg >= 0 && f->v[i].reg != R_RAX)
-            P(e, "\tmovq %%rax, %s", W64[f->v[i].reg]);
-        else if (f->v[i].reg < 0)
-            P(e, "\tmovq %%rax, %s", slot_by_id(f->v[i].slot));
-        gi++;
-    }
     if (total_bytes > 0) {
-        /* zero the frame with reserved regs only (r10/r11): allocated
-         * scratch regs may already hold param values */
+        /* allocate + zero first: reserved regs only, incoming arg regs are
+         * untouched, and spilled params are written after */
         P(e, "\tsubq $%d, %%rsp", framesz);
         P(e, "\tleaq -%d(%%rbp), %%r10", framesz);
         P(e, "\tmovq $%d, %%r11", total_bytes / 8);
@@ -1509,6 +1730,41 @@ static void emit_fn(Em *e, FnCg *f, FnDecl *fn) {
         P(e, "\taddq $8, %%r10");
         P(e, "\tsubq $1, %%r11");
         P(e, "\tjnz .Lz%d", e->epiid);
+    }
+    /* params: ints canonicalize through rax into their GPR or slot; floats
+     * come in on the xmm queue; structs arrive as a pointer and are copied
+     * into the callee's own aggregate slot (by-value semantics). */
+    int gi = 0, xi = 0;
+    if (f->retptr >= 0) {
+        P(e, "\tmovq %s, %s", W64[ARGREG[0]], slot_by_id(f->v[f->retptr].slot));
+        gi = 1;
+    }
+    int pbase = f->retptr >= 0 ? 1 : 0;
+    for (int i = 0; i < fn->nparams; i++) {
+        Ty pty = fn->params[i].ty;
+        VReg *pv = &f->v[pbase + i];
+        if (ty_is_float(pty)) {
+            P(e, "\tmov%s %%xmm%d, %s", pty == TY_F64 ? "sd" : "ss", xi,
+              slot_by_id(pv->slot));
+            xi++;
+            continue;
+        }
+        if (pty == TY_STRUCT && pv->abytes > 0) {
+            int bytes = pv->abytes;
+            P(e, "\tmovq %s, %%r11", W64[ARGREG[gi]]);
+            for (int off = 0; off < bytes; off += 8) {
+                P(e, "\tmovq %d(%%r11), %%r10", off);
+                P(e, "\tmovq %%r10, %d(%%rbp)", pv->aoff + off);
+            }
+            gi++;
+            continue;
+        }
+        extend_rax(e, pty, ARGREG[gi], NULL);
+        if (pv->reg >= 0 && pv->reg != R_RAX)
+            P(e, "\tmovq %%rax, %s", W64[pv->reg]);
+        else if (pv->reg < 0)
+            P(e, "\tmovq %%rax, %s", slot_by_id(pv->slot));
+        gi++;
     }
     e->curepi = e->epiid++;
     for (int p = 0; p < f->n; p++)
@@ -1551,6 +1807,10 @@ void native_file(Arena *a, Decl **decls, int ndecls, const char *outpath, bool f
     c.nfns = 0;
     for (int i = 0; i < ndecls; i++)
         if (decls[i]->kind == D_FN) c.fns[c.nfns++] = decls[i]->fn;
+    c.structs = xmalloc(sizeof(StDecl *) * (size_t)(ndecls ? ndecls : 1));
+    for (int i = 0; i < ndecls; i++)
+        if (decls[i]->kind == D_STRUCT && decls[i]->st)
+            c.structs[c.nstructs++] = decls[i]->st;
 
     /* one empty-string blob is guaranteed to exist (str zero value) */
     strtab_add(&c, "", 0);
@@ -1568,9 +1828,16 @@ void native_file(Arena *a, Decl **decls, int ndecls, const char *outpath, bool f
         memset(f, 0, sizeof *f);
         f->file = fn->span.file;
         f->fn = fn;
+        f->retptr = -1;
+        if (fn->ret == TY_STRUCT) {
+            f->retptr = vreg_new(f, TY_I64);
+            f->v[f->retptr].pinned = 1;
+        }
         for (int j = 0; j < fn->nparams; j++) {
             int v = vreg_new(f, fn->params[j].ty);
             f->v[v].varname = fn->params[j].name;
+            if (fn->params[j].ty == TY_STRUCT)
+                f->v[v].abytes = ty_bytes(&c, TY_STRUCT, fn->params[j].tname);
         }
         for (int j = 0; j < fn->nbody; j++)
             ev_stmt(f, &c, fn->body[j]);
