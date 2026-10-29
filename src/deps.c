@@ -312,11 +312,9 @@ int deps_init_template(const char *argname) {
         fprintf(f,
                 "use tier core;\n"
                 "\n"
-                "extern \"C\" { fn puts(p: str) -> i32; }\n"
-                "\n"
                 "// %s - a Tripon program (.tp)\n"
                 "fn main() -> i32 {\n"
-                "    puts(\"hello, tripon\");\n"
+                "    print_str(\"hello, tripon\");\n"
                 "    return 0;\n"
                 "}\n",
                 name);

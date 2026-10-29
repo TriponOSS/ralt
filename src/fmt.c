@@ -330,38 +330,21 @@ void fmt_file(Arena *a, Decl **decls, int ndecls, FILE *out) {
             fprintf(out, "use tier %s;\n", d->name);
         } else if (d->kind == D_FN) {
             FnDecl *fn = d->fn;
-            bool fn_extern = fn->is_extern;
-            if (fn_extern) {
-                fprintf(out, "extern \"C\" {\n");
-                fprintf(out, "    fn %s(", fn->name);
-                for (int k = 0; k < fn->nparams; k++) {
-                    if (k) fputs(", ", out);
-                    fprintf(out, "%s: ", fn->params[k].name);
-                    fm_tyname(&f, fn->params[k].ty, fn->params[k].tname);
-                }
-                fprintf(out, ")");
-                if (fn->ret != TY_VOID) {
-                    fprintf(out, " -> ");
-                    fm_tyname(&f, fn->ret, fn->retname);
-                }
-                fprintf(out, ";\n}\n");
-            } else {
-                fprintf(out, "fn %s(", fn->name);
-                for (int k = 0; k < fn->nparams; k++) {
-                    if (k) fputs(", ", out);
-                    fprintf(out, "%s: ", fn->params[k].name);
-                    fm_tyname(&f, fn->params[k].ty, fn->params[k].tname);
-                }
-                fprintf(out, ")");
-                if (fn->ret != TY_VOID) {
-                    fprintf(out, " -> ");
-                    fm_tyname(&f, fn->ret, fn->retname);
-                }
-                fputs(" {\n", out);
-                f.indent = 1;
-                fm_stmts(&f, fn->body, fn->nbody);
-                fputs("}\n", out);
+            fprintf(out, "fn %s(", fn->name);
+            for (int k = 0; k < fn->nparams; k++) {
+                if (k) fputs(", ", out);
+                fprintf(out, "%s: ", fn->params[k].name);
+                fm_tyname(&f, fn->params[k].ty, fn->params[k].tname);
             }
+            fprintf(out, ")");
+            if (fn->ret != TY_VOID) {
+                fprintf(out, " -> ");
+                fm_tyname(&f, fn->ret, fn->retname);
+            }
+            fputs(" {\n", out);
+            f.indent = 1;
+            fm_stmts(&f, fn->body, fn->nbody);
+            fputs("}\n", out);
         } else if (d->kind == D_STRUCT) {
             StDecl *st = d->st;
             fprintf(out, "struct %s {\n", st->name);

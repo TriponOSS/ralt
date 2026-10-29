@@ -310,7 +310,6 @@ struct FnDecl {
     Param *params; int nparams;
     Ty ret;
     const char *retname;    /* when ret is a struct/enum type */
-    bool is_extern;
     Stmt **body; int nbody;
     Span span;
 };

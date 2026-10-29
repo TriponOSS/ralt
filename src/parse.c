@@ -9,7 +9,6 @@ typedef struct {
     const char *file;
     int si_ok;      /* struct-init IDENT '{' currently allowed (suppressed in if/while/match conditions) */
     int no_anon;    /* struct fields / enum payloads deny opt/result types in v0 */
-    int allow_ptr;  /* raw *i8 types: extern "C" islands only (spec T7) */
 } Parser;
 
 static Token *peek(Parser *p) { return &p->toks[p->pos]; }
@@ -43,22 +42,6 @@ static Token *expect_token(Parser *p, TokKind k, const char *what) {
  * (TY_TYPEDEF): the typecheck pre-pass resolves it against the decl tables. */
 static Ty parse_type(Parser *p, const char **tname) {
     if (tname) *tname = NULL;
-    /* raw pointer type: *i8 -> char *, extern "C" islands only (spec T7) */
-    if (at(p, TK_STAR)) {
-        Token *star = advance(p);
-        if (!p->allow_ptr) {
-            diag(star->span, E0101, SEV_ERROR,
-                 "raw pointer types live only inside extern \"C\" islands (T7)",
-                 "move this signature into extern \"C\" { ... }, or use str for text");
-        }
-        Token *tn = expect_token(p, TK_IDENT, "the pointee type ('*i8' is available v0)");
-        if (strcmp(tn->text, "i8") == 0) return TY_PTR8;
-        char msg[160];
-        snprintf(msg, sizeof msg, "unsupported pointee '%s': v0 externs take *i8", tn->text);
-        diag(tn->span, E0101, SEV_ERROR, msg,
-             "*i8 maps to plain char*; more pointee types land with the allocator tier");
-        return TY_PTR8;
-    }
     /* fixed array: "[" Num "]" Type (grammar.ebnf ArrayType). No slice in v0. */
     if (at(p, TK_LB)) {
         Token *lb = advance(p);
@@ -87,8 +70,6 @@ static Ty parse_type(Parser *p, const char **tname) {
     }
     if (at(p, TK_FN)) {
         Token *fk = advance(p);
-        bool saved_ptr = p->allow_ptr;
-        p->allow_ptr = true;
         expect_token(p, TK_LP, "'(' after fn");
         Ty params[8]; int nparams = 0;
         if (!at(p, TK_RP)) {
@@ -119,7 +100,6 @@ static Ty parse_type(Parser *p, const char **tname) {
         const char *cname = arena_dupstr(p->a, buf, strlen(buf));
         fn_type_declare(cname, ret, rtn, params, nparams, fk->span);
         if (tname) *tname = cname;
-        p->allow_ptr = saved_ptr;
         return TY_FN;
     }
     Token *t = expect_token(p, TK_IDENT, "a type name");
@@ -638,17 +618,13 @@ static Stmt *parse_block_stmt(Parser *p) {
 
 /* ---------------- top level ---------------- */
 
-static FnDecl *parse_fn_proto(Parser *p, bool extern_mode) {
+static FnDecl *parse_fn_proto(Parser *p) {
     Token *kw = expect_token(p, TK_FN, "'fn'");
     Token *name = expect_token(p, TK_IDENT, "a function name");
     FnDecl *fn = arena_zalloc(p->a, sizeof(FnDecl));
     fn->name = name->text;
     fn->span = kw->span;
     expect_token(p, TK_LP, "'(' after fn name");
-    /* raw pointers are an extern-island feature: *i8 allowed while parsing
-     * this signature only */
-    bool saved_ptr = p->allow_ptr != 0;
-    p->allow_ptr = extern_mode;
     while (!at(p, TK_RP) && !at(p, TK_EOF)) {
         Token *pn = expect_token(p, TK_IDENT, "a parameter name");
         expect_token(p, TK_COLON, "':' before the parameter type");
@@ -666,8 +642,6 @@ static FnDecl *parse_fn_proto(Parser *p, bool extern_mode) {
     expect_token(p, TK_RP, "')' to close parameters");
     if (eat(p, TK_ARROW)) fn->ret = parse_type(p, &fn->retname);
     else fn->ret = TY_VOID;
-    p->allow_ptr = saved_ptr;
-    fn->is_extern = extern_mode;
     return fn;
 }
 
@@ -767,26 +741,6 @@ Decl **parse_file(Arena *a, Token *toks, int ntoks, const char *file) {
             expect_token(&p, TK_SEMI, "';' after tier name");
             continue;
         }
-        if (at(&p, TK_EXTERN)) {
-            Token *ekw = advance(&p);
-            Token *lit = expect_token(&p, TK_STR, "an ABI string like \"C\" after extern");
-            (void)ekw;
-            if (lit->len != 1 || lit->text[0] != 'C') {
-                diag(lit->span, E0101, SEV_ERROR, "only extern \"C\" is supported in P1",
-                     "other ABIs arrive with more backends");
-            }
-            expect_token(&p, TK_BRACE_L, "'{' to open the extern block");
-            while (!at(&p, TK_BRACE_R) && !at(&p, TK_EOF)) {
-                FnDecl *fn = parse_fn_proto(&p, true);
-                expect_token(&p, TK_SEMI, "';' after extern fn signature");
-                Decl *d = arena_zalloc(a, sizeof(Decl));
-                d->kind = D_FN;
-                d->fn = fn;
-                vec_push_ptr((VecPtr *)&out, d);
-            }
-            expect_token(&p, TK_BRACE_R, "'}' to close the extern block");
-            continue;
-        }
         if (at(&p, TK_LET) || at(&p, TK_CONST)) {
             Token *kw = advance(&p);
             Decl *d = arena_zalloc(a, sizeof(Decl));
@@ -803,7 +757,7 @@ Decl **parse_file(Arena *a, Token *toks, int ntoks, const char *file) {
             continue;
         }
         if (at(&p, TK_FN)) {
-            FnDecl *fn = parse_fn_proto(&p, false);
+            FnDecl *fn = parse_fn_proto(&p);
             fn->body = NULL;
             fn->nbody = 0;
             Stmt *blk = parse_block_stmt(&p);
@@ -834,7 +788,7 @@ Decl **parse_file(Arena *a, Token *toks, int ntoks, const char *file) {
         Span sp = peek(&p)->span;
         char msg[160];
         snprintf(msg, sizeof msg, "expected a top-level declaration, got %s", tok_kind_word(peek(&p)->kind));
-        diag(sp, E0101, SEV_ERROR, msg, "top level: use tier, extern blocks, fn");
+        diag(sp, E0101, SEV_ERROR, msg, "top level: use tier, fn, struct, enum, const");
         break;
     }
 

@@ -250,7 +250,7 @@ void parse_tree_dump(FILE *o, Decl **decls, int ndecls) {
         Decl *dl = decls[d];
         switch (dl->kind) {
         case D_FN:
-            put_word(o, dl->fn->is_extern ? "EXTFN " : "FN ");
+            put_word(o, "FN ");
             put_word(o, dl->fn->name);
             put_word(o, " ret=");
             dump_ty_annot(o, dl->fn->ret, dl->fn->retname);
@@ -263,9 +263,8 @@ void parse_tree_dump(FILE *o, Decl **decls, int ndecls) {
                 dump_ty_annot(o, dl->fn->params[i].ty, dl->fn->params[i].tname);
                 fputc('\n', o);
             }
-            if (!dl->fn->is_extern)
-                for (int i = 0; i < dl->fn->nbody; i++)
-                    dump_stmt(o, dl->fn->body[i], 1);
+            for (int i = 0; i < dl->fn->nbody; i++)
+                dump_stmt(o, dl->fn->body[i], 1);
             break;
         case D_TIER:
             put_word(o, "TIER ");

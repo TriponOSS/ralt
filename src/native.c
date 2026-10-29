@@ -149,7 +149,7 @@ static bool ty_unsig(Ty t) {
 }
 static bool ty_ok(Ty t) {
     return ty_is_int(t) || t == TY_BOOL || t == TY_STR || t == TY_VOID ||
-           t == TY_PTR8 || t == TY_UNSET || t == TY_STRUCT || t == TY_ARRAY ||
+           t == TY_UNSET || t == TY_STRUCT || t == TY_ARRAY ||
            t == TY_ENUM || t == TY_OPT || t == TY_RESULT;
 }
 static void reject_slice(void) {
@@ -338,7 +338,7 @@ static int ev_expr(FnCg *f, Ctx *c, Expr *e) {
         Ty bt = e->lhs->ty == TY_UNSET ? e->rhs->ty : e->lhs->ty;
         bool bf = ty_is_float(bt);
         if ((op == TK_EQ || op == TK_NE) && !bf) {
-            if (e->lhs->ty == TY_STR || e->lhs->ty == TY_PTR8) {
+            if (e->lhs->ty == TY_STR) {
                 /* strcmp(a, b) == 0 */
                 int a = ev_expr(f, c, e->lhs);
                 int b = ev_expr(f, c, e->rhs);
@@ -405,7 +405,7 @@ static int ev_expr(FnCg *f, Ctx *c, Expr *e) {
             return -1;
         }
         if (strcmp(e->callee, "len") == 0) {
-            if (e->args[0]->ty != TY_STR && e->args[0]->ty != TY_PTR8) reject_slice();
+            if (e->args[0]->ty != TY_STR) reject_slice();
             int a = ev_expr(f, c, e->args[0]);
             int *argv = xmalloc(sizeof(int));
             argv[0] = a;
@@ -418,8 +418,8 @@ static int ev_expr(FnCg *f, Ctx *c, Expr *e) {
         FnDecl *fn = NULL;
         for (int i = 0; i < c->nfns; i++)
             if (strcmp(c->fns[i]->name, e->callee) == 0) { fn = c->fns[i]; break; }
-        bool is_extern = fn ? fn->is_extern : true;
-        if (fn && !fn->is_extern) {
+        bool is_extern = fn ? false : true;
+        if (fn) {
             for (int i = 0; i < fn->nparams; i++)
                 if (!ty_ok(fn->params[i].ty)) reject_ty(fn->params[i].ty);
             if (!ty_ok(fn->ret)) reject_ty(fn->ret);
@@ -438,7 +438,7 @@ static int ev_expr(FnCg *f, Ctx *c, Expr *e) {
         return d;
     }
     case EX_INDEX: {
-        if (e->base->ty != TY_STR && e->base->ty != TY_PTR8) reject_slice();
+        if (e->base->ty != TY_STR) reject_slice();
         int s = ev_expr(f, c, e->base);
         int i = ev_expr(f, c, e->index);
         int d = vreg_new(f, TY_U8);
@@ -1412,7 +1412,7 @@ void native_file(Arena *a, Decl **decls, int ndecls, const char *outpath, bool f
     int nfc = 0;
     for (int i = 0; i < c.nfns; i++) {
         FnDecl *fn = c.fns[i];
-        if (fn->is_extern || fn->nbody == 0) continue;
+        if (fn->nbody == 0) continue;
         for (int j = 0; j < fn->nparams; j++)
             if (!ty_ok(fn->params[j].ty)) reject_ty(fn->params[j].ty);
         if (!ty_ok(fn->ret)) reject_ty(fn->ret);

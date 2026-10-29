@@ -16,7 +16,7 @@ static const struct { const char *kw; TokKind k; } KEYWORDS[] = {
     {"fn", TK_FN}, {"let", TK_LET}, {"const", TK_CONST}, {"return", TK_RETURN},
     {"if", TK_IF}, {"else", TK_ELSE}, {"while", TK_WHILE}, {"match", TK_MATCH},
     {"struct", TK_STRUCT}, {"enum", TK_ENUM}, {"use", TK_USE}, {"tier", TK_TIER},
-    {"extern", TK_EXTERN}, {"true", TK_TRUE}, {"false", TK_FALSE},
+    {"true", TK_TRUE}, {"false", TK_FALSE},
     {"mut", TK_MUT}, {"pub", TK_PUB}, {"cast", TK_CAST},
 };
 

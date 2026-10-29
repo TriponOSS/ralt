@@ -11,7 +11,7 @@ void doc_file(Arena *a, Decl **decls, int ndecls, FILE *out, bool json) {
         if (decls[i]->kind != D_FN) continue;
         FnDecl *fn = decls[i]->fn;
         char sig[1024];
-        int n = snprintf(sig, sizeof sig, "%sfn %s(", fn->is_extern ? "extern \"C\" " : "", fn->name);
+        int n = snprintf(sig, sizeof sig, "fn %s(", fn->name);
         for (int k = 0; k < fn->nparams; k++) {
             n += snprintf(sig + n, sizeof sig - (size_t)n, "%s%s: %s",
                           k ? ", " : "", fn->params[k].name, ty_name(fn->params[k].ty));
@@ -32,8 +32,8 @@ void doc_file(Arena *a, Decl **decls, int ndecls, FILE *out, bool json) {
                 if (*p == '"') fputs("\\\"", out);
                 else fputc(*p, out);
             }
-            fprintf(out, "\", \"extern\": %s, \"file\": \"%s\", \"line\": %d }",
-                    fn->is_extern ? "true" : "false", fn->span.file, fn->span.line);
+            fprintf(out, "\", \"file\": \"%s\", \"line\": %d }",
+                    fn->span.file, fn->span.line);
         } else {
             fprintf(out, "%s\n", sig);
         }

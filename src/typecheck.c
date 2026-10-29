@@ -123,6 +123,8 @@ static const Builtin BUILTINS[] = {
     {"print_f64", TY_VOID, 1, {TY_F64, TY_UNSET, TY_UNSET, TY_UNSET}},
     {"print_str", TY_VOID, 1, {TY_STR, TY_UNSET, TY_UNSET, TY_UNSET}},
     {"len",       TY_I32, 1, {TY_STR, TY_UNSET, TY_UNSET, TY_UNSET}},
+    {"putchar",   TY_I32, 1, {TY_I32, TY_UNSET, TY_UNSET, TY_UNSET}},
+    {"getenv",    TY_STR, 1, {TY_STR, TY_UNSET, TY_UNSET, TY_UNSET}},
     /* GUI builtins (Linux/GTK backend) */
 };
 
@@ -146,7 +148,7 @@ static void prepass_fns(Ctx *c, Decl **decls, int ndecls) {
         if (decls[i]->kind == D_FN) {
             /* duplicate check */
             for (int j = 0; j < i && j < c->nfuncs; j++)
-                if (strcmp(c->funcs[j]->name, decls[i]->fn->name) == 0 && !decls[i]->fn->is_extern) {
+                if (strcmp(c->funcs[j]->name, decls[i]->fn->name) == 0) {
                     char msg[180];
                     snprintf(msg, sizeof msg, "function '%s' is already defined", decls[i]->fn->name);
                     diag(decls[i]->fn->span, E0201, SEV_ERROR, msg,
@@ -337,12 +339,6 @@ static bool ty_same(Ty a, const char *an, Ty b, const char *bn) {
         a == TY_OPT || a == TY_RESULT || a == TY_ARRAY || a == TY_FN)
         return an && bn && strcmp(an, bn) == 0;
     return true;
-}
-
-/* the extern "C" fence (T7) is the one place pointer/text types meet:
- * *i8 char* values pass into str positions and literals pass into *i8 */
-static bool ty_fence_ok(Ty a, Ty b) {
-    return (a == TY_PTR8 && b == TY_STR) || (a == TY_STR && b == TY_PTR8);
 }
 
 /* ---------------- expression typing ---------------- */
@@ -594,7 +590,7 @@ static Ty tc_expr(Ctx *c, Expr *e) {
                 e->ival = ai ? ai->len : 0;
                 return e->ty;
             }
-            if (at == TY_STR || at == TY_PTR8) { e->ty = TY_I32; return e->ty; }
+            if (at == TY_STR ) { e->ty = TY_I32; return e->ty; }
             if (at != TY_UNSET) {
                 char msg[220];
                 snprintf(msg, sizeof msg, "len() takes an array or str, got %s",
@@ -618,8 +614,7 @@ static Ty tc_expr(Ctx *c, Expr *e) {
                     Ty at = tc_expr_w(c, e->args[i], barg[i], NULL);
                     if (at == TY_UNSET || barg[i] == TY_UNSET) continue;
                     if (barg[i] == TY_FN && at == TY_FN) continue; /* any fn arity accepted */
-                    if (!ty_same(at, e->args[i]->tname, barg[i], NULL) &&
-                        !ty_fence_ok(at, barg[i])) {
+                    if (!ty_same(at, e->args[i]->tname, barg[i], NULL)) {
                         char msg[240];
                         snprintf(msg, sizeof msg, "argument %d of '%s' must be %s, got %s",
                                  i + 1, e->callee,
@@ -636,7 +631,7 @@ static Ty tc_expr(Ctx *c, Expr *e) {
         if (!fn) {
             char msg[200];
             snprintf(msg, sizeof msg, "call to unknown function '%s'", e->callee);
-            diag(e->span, E0201, SEV_ERROR, msg, "declare it at top level or in an extern block");
+            diag(e->span, E0201, SEV_ERROR, msg, "declare it at top level or bring it in from a module");
             e->ty = TY_UNSET;
             return TY_UNSET;
         }
@@ -653,8 +648,7 @@ static Ty tc_expr(Ctx *c, Expr *e) {
             Ty at = tc_expr_w(c, e->args[i], fn->params[i].ty, fn->params[i].tname);
             /* no cascades: if the argument already errored deeper, stop here */
             if (at == TY_UNSET || fn->params[i].ty == TY_UNSET) continue;
-            if (!ty_same(at, e->args[i]->tname, fn->params[i].ty, fn->params[i].tname) &&
-                !ty_fence_ok(at, fn->params[i].ty)) {
+            if (!ty_same(at, e->args[i]->tname, fn->params[i].ty, fn->params[i].tname)) {
                 char msg[260];
                 snprintf(msg, sizeof msg, "argument %d of '%s' must be %s, got %s",
                          i + 1, fn->name,
@@ -739,8 +733,7 @@ static Ty tc_expr(Ctx *c, Expr *e) {
         }
 
         if (is_cmp || is_eq) {
-            if (!ty_same(lhs, e->lhs->tname, rhs, e->rhs->tname) &&
-                !ty_fence_ok(lhs, rhs)) {
+            if (!ty_same(lhs, e->lhs->tname, rhs, e->rhs->tname)) {
                 char msg[240];
                 snprintf(msg, sizeof msg, "cannot compare %s with %s; no implicit conversion exists",
                          ty_disp(lhs, e->lhs->tname), ty_disp(rhs, e->rhs->tname));
@@ -750,7 +743,7 @@ static Ty tc_expr(Ctx *c, Expr *e) {
                 return TY_UNSET;
             }
             if (is_eq && !ty_is_num(lhs) && lhs != TY_BOOL) {
-                if (lhs == TY_STR || lhs == TY_PTR8) {
+                if (lhs == TY_STR ) {
                     /* str equality: byte-compare semantics, defined */
                     e->ty = TY_BOOL;
                     return TY_BOOL;
@@ -793,7 +786,7 @@ static Ty tc_expr(Ctx *c, Expr *e) {
             }
             if (e->op == TK_PERCENT && !ty_is_int(lhs)) {
                 diag(e->span, E0202, SEV_ERROR, "'%' needs integer operands",
-                     "float remainder is not a thing here; use fmod via extern if needed");
+                     "float remainder is not a thing here; scale and use % on integers");
                 e->ty = TY_UNSET;
                 return TY_UNSET;
             }
@@ -846,7 +839,7 @@ static Ty tc_expr(Ctx *c, Expr *e) {
             e->is_const_ref = e->base->is_const_ref;
             return e->ty;
         }
-        if (bt == TY_STR || bt == TY_PTR8) {
+        if (bt == TY_STR ) {
             Ty it = tc_expr(c, e->index);
             if (it != TY_UNSET && !ty_is_int(it)) {
                 char msg[220];
@@ -1119,8 +1112,7 @@ static void tc_stmt(Ctx *c, Stmt *s) {
             c->spread_pos = 1;
             Ty it = tc_expr_w(c, s->init, declared, s->tname);
             c->spread_pos = was;
-            if (!ty_same(it, s->init->tname, declared, s->tname) &&
-                !ty_fence_ok(it, declared)) {
+            if (!ty_same(it, s->init->tname, declared, s->tname)) {
                 char msg[240];
                 snprintf(msg, sizeof msg, "initializer is %s but binding is %s; no implicit conversion exists",
                          it == TY_UNSET ? "unknown" : ty_disp(it, s->init->tname),
@@ -1464,7 +1456,7 @@ void typecheck_file(Arena *a, Decl **decls, int ndecls) {
 
     bool have_main = false;
     for (int i = 0; i < c.nfuncs; i++)
-        if (strcmp(c.funcs[i]->name, "main") == 0 && !c.funcs[i]->is_extern) {
+        if (strcmp(c.funcs[i]->name, "main") == 0) {
             have_main = true;
             FnDecl *m = c.funcs[i];
             if (m->nparams != 0) {
@@ -1489,7 +1481,7 @@ void typecheck_file(Arena *a, Decl **decls, int ndecls) {
 
     /* typecheck the rest of the non-main functions too */
     for (int i = 0; i < c.nfuncs; i++) {
-        if (strcmp(c.funcs[i]->name, "main") == 0 || c.funcs[i]->is_extern) continue;
+        if (strcmp(c.funcs[i]->name, "main") == 0) continue;
         FnDecl *fn = c.funcs[i];
         c.cur_fn = fn;
         c.scopes = global_scope;

@@ -182,6 +182,8 @@ static void emit_prologue(Cg *g) {
     fputs("static void tp_builtin_print_f64(double x) { printf(\"%.2f\\n\", x); }\n", g->out);
     fputs("static void tp_builtin_print_str(const char *x) { fputs(x, stdout); fputc('\\n', stdout); }\n", g->out);
     fputs("static int32_t tp_builtin_len(const char *x) { return (int32_t)strlen(x); }\n", g->out);
+    fputs("static int32_t tp_builtin_putchar(int32_t c) { return putchar((int)c); }\n", g->out);
+    fputs("static const char *tp_builtin_getenv(const char *n) { const char *v = getenv(n); return v ? v : \"\"; }\n", g->out);
     fputs("static int64_t tp_bounds_g(int64_t i, int64_t n, const char *s, int l) { if (i < 0 || i >= n) tp_fail(s, l, 9002, \"index-out-of-bounds\"); return i; }\n", g->out);
     fputs("static int64_t tp_strbounds_g(int64_t i, const char *x, const char *s, int l) { if (i < 0 || i >= (int64_t)strlen(x)) tp_fail(s, l, 9002, \"index-out-of-bounds\"); return i; }\n", g->out);
     fputs("static void tp_arrcpy(void *d, const void *s, size_t n) { memcpy(d, s, n); }\n", g->out);
@@ -306,7 +308,7 @@ static void emit_bin(Cg *g, Expr *e) {
     switch (e->op) {
     case TK_EQ:
     case TK_NE: {
-        if (e->lhs->ty == TY_STR || e->lhs->ty == TY_PTR8) {
+        if (e->lhs->ty == TY_STR) {
             if (e->op == TK_EQ) fputs("tp_str_eq(", g->out);
             else fputs("(!tp_str_eq(", g->out);
             emit_expr(g, e->lhs);
@@ -409,7 +411,8 @@ static void emit_bin(Cg *g, Expr *e) {
 }
 
 static bool is_builtin(const char *name) {
-    static const char *B[] = {"print_i32", "print_i64", "print_f64", "print_str", "len"};
+    static const char *B[] = {"print_i32", "print_i64", "print_f64", "print_str", "len",
+                              "putchar", "getenv"};
     for (size_t i = 0; i < sizeof B / sizeof B[0]; i++)
         if (strcmp(B[i], name) == 0) return true;
     return false;
@@ -499,7 +502,7 @@ static void emit_expr(Cg *g, Expr *e) {
         for (int i = 0; i < g->nfuncs; i++)
             if (strcmp(g->funcs[i]->name, e->sval) == 0) { fn = g->funcs[i]; break; }
         if (fn && e->ty == TY_FN) {
-            fputs(fn->is_extern ? fn->name : cg_fnname(g, fn), g->out);
+            fputs(cg_fnname(g, fn), g->out);
         } else {
             fputs(cg_ident(g, e->sval), g->out);
         }
@@ -523,7 +526,7 @@ static void emit_expr(Cg *g, Expr *e) {
         FnDecl *fn = NULL;
         for (int i = 0; i < g->nfuncs; i++)
             if (strcmp(g->funcs[i]->name, e->callee) == 0) { fn = g->funcs[i]; break; }
-        if (fn) fprintf(g->out, "%s(", fn->is_extern ? fn->name : cg_fnname(g, fn));
+        if (fn) fprintf(g->out, "%s(", cg_fnname(g, fn));
         else fprintf(g->out, "%s(", e->callee);
         for (int i = 0; i < e->nargs; i++) {
             if (i) fputs(", ", g->out);
@@ -556,7 +559,7 @@ static void emit_expr(Cg *g, Expr *e) {
         break;
     case EX_INDEX: {
         Expr *base = e->base;
-        if (base->ty == TY_STR || base->ty == TY_PTR8) {
+        if (base->ty == TY_STR) {
             fputs("((uint8_t)", g->out);
             emit_expr(g, base);
             fputs("[tp_strbounds_g((int64_t)(", g->out);
@@ -874,15 +877,6 @@ static void emit_fn_proto(Cg *g, FnDecl *fn) {
 }
 
 static void emit_fn(Cg *g, FnDecl *fn) {
-    if (fn->is_extern) {
-        fprintf(g->out, "extern %s %s(", tp_type_name(g, fn->ret, fn->retname), fn->name);
-        for (int i = 0; i < fn->nparams; i++) {
-            if (i) fputs(", ", g->out);
-            fputs(tp_type_name(g, fn->params[i].ty, fn->params[i].tname), g->out);
-        }
-        fputs(");\n", g->out);
-        return;
-    }
     bool is_main = strcmp(fn->name, "main") == 0;
     if (is_main) {
         fprintf(g->out, "int main(void) {\n");
@@ -978,15 +972,11 @@ void codegen_file(Arena *a, Decl **decls, int ndecls, const char *outpath, bool 
         }
         fputs(");\n", g.out);
     }
-    fputs("\n/* ---- extern blocks ---- */\n", out);
-    for (int i = 0; i < ndecls; i++)
-        if (decls[i]->kind == D_FN && decls[i]->fn->is_extern) emit_fn(&g, decls[i]->fn);
-    /* forward declarations: Tripon allows forward/mutual refs, deps merge freely */
     fputs("\n/* ---- forward decls ---- */\n", out);
     for (int i = 0; i < ndecls; i++)
-        if (decls[i]->kind == D_FN && !decls[i]->fn->is_extern) emit_fn_proto(&g, decls[i]->fn);
+        if (decls[i]->kind == D_FN) emit_fn_proto(&g, decls[i]->fn);
     fputs("\n/* ---- tripon fns (main maps to C main) ---- */\n", out);
     for (int i = 0; i < ndecls; i++)
-        if (decls[i]->kind == D_FN && !decls[i]->fn->is_extern) emit_fn(&g, decls[i]->fn);
+        if (decls[i]->kind == D_FN) emit_fn(&g, decls[i]->fn);
     fclose(out);
 }
