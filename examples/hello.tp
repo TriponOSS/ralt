@@ -1,0 +1,13 @@
+// examples/hello.tp - the canonical smoke test
+// run: ralt run examples/hello.tp
+
+use tier core;
+
+extern "C" {
+    fn puts(p: str) -> i32;
+}
+
+fn main() -> i32 {
+    puts("hello from tripon");
+    return 0;
+}

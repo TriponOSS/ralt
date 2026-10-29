@@ -1,0 +1,14 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  build:
+    strategy:
+      matrix:
+        cc: [gcc, clang]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        run: make CC=${{ matrix.cc }}
+      - name: smoke
+        run: CC=${{ matrix.cc }} sh tests/smoke.sh

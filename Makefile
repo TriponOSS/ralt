@@ -12,5 +12,8 @@ build/ralt: $(SRC) $(HDR)
 .PHONY: all test clean
 all: build/ralt
 
+test: build/ralt
+	sh tests/smoke.sh
+
 clean:
 	rm -rf build
