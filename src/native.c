@@ -149,7 +149,8 @@ static bool ty_unsig(Ty t) {
 }
 static bool ty_ok(Ty t) {
     return ty_is_int(t) || t == TY_BOOL || t == TY_STR || t == TY_VOID ||
-           t == TY_PTR8 || t == TY_UNSET;
+           t == TY_PTR8 || t == TY_UNSET || t == TY_STRUCT || t == TY_ARRAY ||
+           t == TY_ENUM || t == TY_OPT || t == TY_RESULT;
 }
 static void reject_slice(void) {
     fprintf(stderr,
