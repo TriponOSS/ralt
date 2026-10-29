@@ -67,6 +67,7 @@ int  deps_init_template(const char *argname);   /* >0 scaffolded, 2 exists, -1 f
 int  deps_install(const char *target);
 int  deps_collect(char ***paths, int *count);
 void deps_free(char ***paths, int count);
+int  deps_lock(void);   /* write ralt.lock: name + content hash per dep */
 
 /* codes - keep in sync with spec/errors.csv; never renumber */
 #define E0001 1

@@ -529,3 +529,102 @@ void deps_free(char ***paths, int count) {
     free(*paths);
     *paths = NULL;
 }
+
+/* ---------------- content-addressed lockfile ---------------- */
+
+/* FNV-1a 64: deterministic, no dependencies, good enough to identify a tree. */
+static uint64_t fnv1a(uint64_t h, const unsigned char *p, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        h ^= (uint64_t)p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static int hash_file(const char *path, uint64_t *h) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 1;
+    unsigned char buf[8192];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) *h = fnv1a(*h, buf, n);
+    fclose(f);
+    return 0;
+}
+
+/* Hash one dependency tree: every collected .tp path (sorted) plus its bytes. */
+static int hash_dep_tree(const char *src, uint64_t *out) {
+    StrList list = {NULL, 0, 0};
+    walk_collect(src, &list);
+    if (list.len == 0) {
+        free(list.items);
+        return 1;
+    }
+    qsort(list.items, (size_t)list.len, sizeof(char *), cmp_strptr);
+    uint64_t h = 1469598103934665603ULL;   /* FNV offset basis */
+    for (int i = 0; i < list.len; i++) {
+        h = fnv1a(h, (const unsigned char *)list.items[i], strlen(list.items[i]));
+        h = fnv1a(h, (const unsigned char *)"\0", 1);
+        if (hash_file(list.items[i], &h) != 0) {
+            while (list.len) free(list.items[--list.len]);
+            free(list.items);
+            return 1;
+        }
+        free(list.items[i]);
+    }
+    free(list.items);
+    *out = h;
+    return 0;
+}
+
+typedef struct { char name[DEP_NAME_MAX]; uint64_t hash; } LockEntry;
+
+static int cmp_lock(const void *a, const void *b) {
+    const LockEntry *x = a, *y = b;
+    return strcmp(x->name, y->name);
+}
+
+/* Write ralt.lock: one "name 016x" line per dep, sorted by name. */
+int deps_lock(void) {
+    Manifest m;
+    char root[PATHBUF];
+    LockEntry entries[DEP_MAX];
+    int n = 0;
+
+    if (manifest_load(&m) != 0) return 1;
+    default_cache_root(root, sizeof root);
+    for (int i = 0; i < m.ndeps; i++) {
+        char src[PATHBUF];
+        if (refresh_one_dep(&m.deps[i]) != 0) return 1;
+        if (is_url(m.deps[i].value)) {
+            snprintf(src, sizeof src, "%.*s/%.*s",
+                     (int)(sizeof src - DEP_NAME_MAX - 1), root,
+                     DEP_NAME_MAX - 1, m.deps[i].name);
+        } else {
+            put(src, sizeof src, m.deps[i].value);
+        }
+        if (!dir_exists(src)) {
+            fprintf(stderr, "ralt: dep %s: no such directory: %s\n", m.deps[i].name, src);
+            return 1;
+        }
+        uint64_t h = 0;
+        if (hash_dep_tree(src, &h) != 0) {
+            fprintf(stderr, "ralt: dep %s: nothing to hash in %s\n", m.deps[i].name, src);
+            return 1;
+        }
+        put(entries[n].name, DEP_NAME_MAX, m.deps[i].name);
+        entries[n].hash = h;
+        n++;
+    }
+    qsort(entries, (size_t)n, sizeof entries[0], cmp_lock);
+
+    FILE *f = fopen("ralt.lock", "w");
+    if (!f) {
+        fprintf(stderr, "ralt: cannot write ralt.lock: %s\n", strerror(errno));
+        return 1;
+    }
+    for (int i = 0; i < n; i++)
+        fprintf(f, "%s %016llx\n", entries[i].name, (unsigned long long)entries[i].hash);
+    fclose(f);
+    printf("-> wrote ralt.lock (%d dep%s)\n", n, n == 1 ? "" : "s");
+    return 0;
+}

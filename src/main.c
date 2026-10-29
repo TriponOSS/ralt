@@ -16,6 +16,7 @@ static void usage(void) {
         "  ralt init  [name]                              scaffold a .tp project (or ./name/)\n"
         "  ralt install <name|url|dir>                     resolve/install a dep\n"
         "  ralt deps                                       list collected dep files\n"
+        "  ralt lock                                       write ralt.lock content hashes\n"
         "  ralt fmt <file.tp>                              print canonical form\n"
         "  ralt lint <file.tp> [--json]                    tier-ceiling lint\n"
         "  ralt doc <file.tp> [--json]                     fn signatures\n"
@@ -181,6 +182,10 @@ int main(int argc, char **argv) {
         for (int i = 0; i < n; i++) printf("%s\n", paths[i]);
         deps_free(&paths, n);
         return 0;
+    }
+    if (strcmp(cmd, "lock") == 0) {
+        if (!deps_manifest_exists()) { fputs("ralt: no ralt.yaml here\n", stderr); return 2; }
+        return deps_lock() == 0 ? 0 : 1;
     }
 
     const char *file = NULL;
