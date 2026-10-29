@@ -124,24 +124,6 @@ static const Builtin BUILTINS[] = {
     {"print_str", TY_VOID, 1, {TY_STR, TY_UNSET, TY_UNSET, TY_UNSET}},
     {"len",       TY_I32, 1, {TY_STR, TY_UNSET, TY_UNSET, TY_UNSET}},
     /* GUI builtins (Linux/GTK backend) */
-    {"gui_init",        TY_I32, 0, {TY_UNSET, TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_window_new",  TY_I32, 1, {TY_STR,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_run",         TY_VOID, 0, {TY_UNSET, TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"webview_new",     TY_I32, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"webview_load",    TY_VOID, 2, {TY_I32,  TY_STR,  TY_UNSET, TY_UNSET}},
-    {"gui_entry_new",   TY_I32, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_button_new",  TY_I32, 2, {TY_I32,  TY_STR,  TY_UNSET, TY_UNSET}},
-    {"gui_button_onclick", TY_VOID, 2, {TY_I32, TY_FN, TY_UNSET, TY_UNSET}},
-    {"gui_entry_text",  TY_STR, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_widget_show", TY_VOID, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_window_show", TY_VOID, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_window_box",  TY_I32, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_show",        TY_VOID, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_hide",        TY_VOID, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_hbox_new",    TY_I32, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_vbox_new",    TY_I32, 1, {TY_I32,  TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_css",         TY_VOID, 1, {TY_STR,   TY_UNSET, TY_UNSET, TY_UNSET}},
-    {"gui_quit",        TY_VOID, 0, {TY_UNSET, TY_UNSET, TY_UNSET, TY_UNSET}},
 };
 
 static bool builtin_info(const char *name, int *ret, int *argc, Ty *args) {
